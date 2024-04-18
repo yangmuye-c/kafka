@@ -85,6 +85,7 @@ import static org.apache.kafka.clients.consumer.CooperativeStickyAssignor.COOPER
 
 /**
  * This class manages the coordination process with the consumer coordinator.
+ *这个类管理与消费者协调器的协调过程。
  */
 public final class ConsumerCoordinator extends AbstractCoordinator {
     private final GroupRebalanceConfig rebalanceConfig;

@@ -97,29 +97,46 @@ public final class ProducerBatch {
 
     /**
      * Append the record to the current record set and return the relative offset within that record set
-     *
+     * 将记录追加到当前记录集中，并返回该记录集中的相对偏移量
      * @return The RecordSend corresponding to this record or null if there isn't sufficient room.
      */
+    /**
+     * 尝试追加一条记录到记录构建器中。如果构建器没有足够的空间容纳这条记录，则返回null；否则，追加记录，并返回一个未来记录元数据对象。
+     *
+     * @param timestamp 记录的时间戳
+     * @param key 记录的键，可能为null
+     * @param value 记录的值，可能为null
+     * @param headers 记录的头部信息，可能包含多个字段
+     * @param callback 回调函数，用于在记录成功追加或出现错误时被调用
+     * @param now 当前时间戳
+     * @return 如果成功追加记录，则返回一个FutureRecordMetadata对象；否则返回null
+     */
     public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers, Callback callback, long now) {
+        // 检查记录构建器是否有足够的空间追加新的记录
         if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
             return null;
         } else {
+            // 计算并记录追加的检查和
             Long checksum = this.recordsBuilder.append(timestamp, key, value, headers);
+            // 更新最大记录大小
             this.maxRecordSize = Math.max(this.maxRecordSize, AbstractRecords.estimateSizeInBytesUpperBound(magic(),
                     recordsBuilder.compressionType(), key, value, headers));
+            // 更新最近一次追加时间
             this.lastAppendTime = now;
+            // 创建并返回一个表示未来记录元数据的FutureRecordMetadata对象
             FutureRecordMetadata future = new FutureRecordMetadata(this.produceFuture, this.recordCount,
                                                                    timestamp, checksum,
                                                                    key == null ? -1 : key.length,
                                                                    value == null ? -1 : value.length,
                                                                    Time.SYSTEM);
-            // we have to keep every future returned to the users in case the batch needs to be
-            // split to several new batches and resent.
+            // 将用户返回的每个Future保存下来，以防批处理需要被分割并重新发送。
             thunks.add(new Thunk(callback, future));
+            // 更新记录计数
             this.recordCount++;
             return future;
         }
     }
+
 
     /**
      * This method is only used by {@link #split(int)} when splitting a large batch to smaller ones.

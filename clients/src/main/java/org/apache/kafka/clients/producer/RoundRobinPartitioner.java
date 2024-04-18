@@ -41,7 +41,7 @@ public class RoundRobinPartitioner implements Partitioner {
 
     /**
      * Compute the partition for the given record.
-     *
+     * 计算给定记录的分区。
      * @param topic The topic name
      * @param key The key to partition on (or null if no key)
      * @param keyBytes serialized key to partition on (or null if no key)

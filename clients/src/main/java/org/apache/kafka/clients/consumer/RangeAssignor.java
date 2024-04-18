@@ -30,6 +30,8 @@ import java.util.Map;
  * and the consumers in lexicographic order. We then divide the number of partitions by the total number of
  * consumers to determine the number of partitions to assign to each consumer. If it does not evenly
  * divide, then the first few consumers will have one extra partition.
+ * 范围分配器以每个主题为基础。对于每个主题，我们按数字顺序排列可用分区，并按字典顺序排列消费者。然后，我们将分区数除以消费者总数，
+ * 以确定分配给每个消费者的分区数。如果它没有平均划分，那么前几个消费者将拥有一个额外的分区。
  *
  * <p>For example, suppose there are two consumers <code>C0</code> and <code>C1</code>, two topics <code>t0</code> and
  * <code>t1</code>, and each topic has 3 partitions, resulting in partitions <code>t0p0</code>, <code>t0p1</code>,
@@ -107,8 +109,11 @@ public class RangeAssignor extends AbstractPartitionAssignor {
 
             List<TopicPartition> partitions = AbstractPartitionAssignor.partitions(topic, numPartitionsForTopic);
             for (int i = 0, n = consumersForTopic.size(); i < n; i++) {
+                // 计算当前消费者应分配的分区起始索引
                 int start = numPartitionsPerConsumer * i + Math.min(i, consumersWithExtraPartition);
+                // 计算当前消费者应分配的分区数量
                 int length = numPartitionsPerConsumer + (i + 1 > consumersWithExtraPartition ? 0 : 1);
+                // 将分区添加到当前消费者的分配列表中
                 assignment.get(consumersForTopic.get(i).memberId).addAll(partitions.subList(start, start + length));
             }
         }

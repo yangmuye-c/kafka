@@ -251,6 +251,7 @@ public final class Cluster {
 
     /**
      * Get the metadata for the specified partition
+     * 获取指定分区的元数据
      * @param topicPartition The topic and partition to fetch info for
      * @return The metadata about the given topic and partition, or null if none is found
      */

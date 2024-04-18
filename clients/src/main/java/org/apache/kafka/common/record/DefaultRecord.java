@@ -176,21 +176,38 @@ public class DefaultRecord implements Record {
     /**
      * Write the record to `out` and return its size.
      */
+    /**
+     * 将键值对数据以及相关元数据写入到指定的数据输出流中。
+     *
+     * @param out 数据输出流，用于接收写入的数据。
+     * @param offsetDelta 偏移量增量，表示当前记录相对于其分区中前一条记录的偏移量增量。
+     * @param timestampDelta 时间戳增量，表示当前记录的时间戳相对于前一条记录的时间戳的增量。
+     * @param key 消息的键，可以为null。
+     * @param value 消息的值，可以为null。
+     * @param headers 消息的头部信息，不能为空。
+     * @return 写入数据的总字节数，包括头部的大小以及数据体的大小。
+     * @throws IOException 如果在写入过程中发生I/O错误。
+     * @throws IllegalArgumentException 如果headers参数为null或者包含null键的header。
+     */
     public static int writeTo(DataOutputStream out,
                               int offsetDelta,
                               long timestampDelta,
                               ByteBuffer key,
                               ByteBuffer value,
                               Header[] headers) throws IOException {
+        // 计算消息体的大小，并写入变长整数表示的消息体长度。
         int sizeInBytes = sizeOfBodyInBytes(offsetDelta, timestampDelta, key, value, headers);
         ByteUtils.writeVarint(sizeInBytes, out);
 
-        byte attributes = 0; // there are no used record attributes at the moment
+        // 初始化并写入属性字节，当前未使用。
+        byte attributes = 0; // 目前没有使用的记录属性
         out.write(attributes);
 
+        // 写入时间戳增量和偏移量增量。
         ByteUtils.writeVarlong(timestampDelta, out);
         ByteUtils.writeVarint(offsetDelta, out);
 
+        // 写入键，如果键为null，则写入-1作为长度标志。
         if (key == null) {
             ByteUtils.writeVarint(-1, out);
         } else {
@@ -199,6 +216,7 @@ public class DefaultRecord implements Record {
             Utils.writeTo(out, key, keySize);
         }
 
+        // 写入值，如果值为null，则写入-1作为长度标志。
         if (value == null) {
             ByteUtils.writeVarint(-1, out);
         } else {
@@ -207,20 +225,24 @@ public class DefaultRecord implements Record {
             Utils.writeTo(out, value, valueSize);
         }
 
+        // 写入头部信息，首先写入头部数量。
         if (headers == null)
             throw new IllegalArgumentException("Headers cannot be null");
 
         ByteUtils.writeVarint(headers.length, out);
 
+        // 遍历每个头部，写入头部的键和值。
         for (Header header : headers) {
             String headerKey = header.key();
             if (headerKey == null)
                 throw new IllegalArgumentException("Invalid null header key found in headers");
 
+            // 写入头部键的长度及内容。
             byte[] utf8Bytes = Utils.utf8(headerKey);
             ByteUtils.writeVarint(utf8Bytes.length, out);
             out.write(utf8Bytes);
 
+            // 写入头部值的长度及内容，如果头部值为null，则写入-1作为长度标志。
             byte[] headerValue = header.value();
             if (headerValue == null) {
                 ByteUtils.writeVarint(-1, out);
@@ -230,6 +252,7 @@ public class DefaultRecord implements Record {
             }
         }
 
+        // 返回总写入字节数，包括头部大小和消息体大小。
         return ByteUtils.sizeOfVarint(sizeInBytes) + sizeInBytes;
     }
 

@@ -575,7 +575,7 @@ public class SubscriptionState {
 
     /**
      * Get the preferred read replica
-     *
+     * 获取首选读副本
      * @param tp The topic partition
      * @param timeMs The current time
      * @return Returns the current preferred read replica, if it has been set and if it has not expired.
@@ -1062,9 +1062,10 @@ public class SubscriptionState {
 
     /**
      * Represents the position of a partition subscription.
-     *
+     * 表示分区订阅的位置。
      * This includes the offset and epoch from the last record in
      * the batch from a FetchResponse. It also includes the leader epoch at the time the batch was consumed.
+     * 这包括来自FetchResponse的批处理中最后一条记录的偏移量和epoch。它还包括使用批处理时的leader纪元。
      */
     public static class FetchPosition {
         public final long offset;

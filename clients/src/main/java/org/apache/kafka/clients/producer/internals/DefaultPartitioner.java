@@ -39,7 +39,7 @@ public class DefaultPartitioner implements Partitioner {
 
     /**
      * Compute the partition for the given record.
-     *
+     * 计算给定记录的分区。
      * @param topic The topic name
      * @param key The key to partition on (or null if no key)
      * @param keyBytes serialized key to partition on (or null if no key)
@@ -64,10 +64,12 @@ public class DefaultPartitioner implements Partitioner {
      */
     public int partition(String topic, Object key, byte[] keyBytes, Object value, byte[] valueBytes, Cluster cluster,
                          int numPartitions) {
+        //判断是否指定了key，未指定则计算出一个分区
         if (keyBytes == null) {
             return stickyPartitionCache.partition(topic, cluster);
         }
         // hash the keyBytes to choose a partition
+        //指定了则散列keyBytes以选择一个分区
         return Utils.toPositive(Utils.murmur2(keyBytes)) % numPartitions;
     }
 
@@ -76,6 +78,7 @@ public class DefaultPartitioner implements Partitioner {
     /**
      * If a batch completed for the current sticky partition, change the sticky partition. 
      * Alternately, if no sticky partition has been determined, set one.
+     * 如果对当前的粘接分区进行了批量处理，请更改粘接分区。或者，如果没有确定粘分区，设置一个。
      */
     public void onNewBatch(String topic, Cluster cluster, int prevPartition) {
         stickyPartitionCache.nextPartition(topic, cluster, prevPartition);

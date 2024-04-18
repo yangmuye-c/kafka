@@ -148,6 +148,7 @@ public class Metadata implements Closeable {
 
     public synchronized int requestUpdateForNewTopics() {
         // Override the timestamp of last refresh to let immediate update.
+        //重写上次刷新的时间戳以允许立即更新。
         this.lastRefreshMs = 0;
         this.needPartialUpdate = true;
         this.requestVersion++;
@@ -560,6 +561,8 @@ public class Metadata implements Closeable {
      * epoch if the metadata is received from a broker which does not support a sufficient Metadata API version.
      * It is also possible that we know of the leader epoch, but not the leader when it is derived
      * from an external source (e.g. a committed offset).
+     * 表示元数据中已知的当前领导状态。如果从不支持足够元数据API版本的代理接收元数据，我们可能知道leader，但不知道epoch。
+     * 也有可能我们知道先导纪元，但当它来自外部来源(例如，承诺偏移量)时，我们不知道先导纪元。
      */
     public static class LeaderAndEpoch {
         private static final LeaderAndEpoch NO_LEADER_OR_EPOCH = new LeaderAndEpoch(Optional.empty(), Optional.empty());

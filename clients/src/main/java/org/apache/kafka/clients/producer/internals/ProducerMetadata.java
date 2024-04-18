@@ -34,6 +34,7 @@ import java.util.Set;
 
 public class ProducerMetadata extends Metadata {
     // If a topic hasn't been accessed for this many milliseconds, it is removed from the cache.
+    //如果一个主题在这么多毫秒内没有被访问，它就会从缓存中删除
     private final long metadataIdleMs;
 
     /* Topics with expiry time */

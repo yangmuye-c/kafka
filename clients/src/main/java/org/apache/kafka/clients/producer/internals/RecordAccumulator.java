@@ -62,6 +62,8 @@ import org.slf4j.Logger;
  * <p>
  * The accumulator uses a bounded amount of memory and append calls will block when that memory is exhausted, unless
  * this behavior is explicitly disabled.
+ * 这个类作为一个队列，将记录累积到{@link MemoryRecords}实例中，然后发送到服务器。
+ * 累加器使用有限的内存，当内存耗尽时，追加调用将阻塞，除非显式禁用此行为。
  */
 public final class RecordAccumulator {
 
@@ -165,7 +167,7 @@ public final class RecordAccumulator {
      * <p>
      * The append result will contain the future metadata, and flag for whether the appended batch is full or a new batch is created
      * <p>
-     *
+     * 向累加器添加一条记录，返回附加结果，追加结果将包含未来的元数据，并标记追加的批处理是否已满，或者是否创建了一个新的批处理
      * @param tp The topic/partition to which this record is being sent
      * @param timestamp The timestamp of the record
      * @param key The key for the record
@@ -177,6 +179,23 @@ public final class RecordAccumulator {
      *                        running the partitioner's onNewBatch method before trying to append again
      * @param nowMs The current time, in milliseconds
      */
+
+    /**
+     * 向指定的主题分区追加记录。
+     *
+     * @param tp 主题分区信息。
+     * @param timestamp 记录的时间戳。
+     * @param key 记录的键。
+     * @param value 记录的值。
+     * @param headers 记录的头部信息。
+     * @param callback 在记录追加完成后执行的回调。
+     * @param maxTimeToBlock 在尝试分配新批次时，最大阻塞的时间（毫秒）。
+     * @param abortOnNewBatch 如果为true，在无法附加到当前批次且需要创建新批次时，将中止操作。
+     * @param nowMs 当前时间（毫秒）。
+     * @return 记录追加结果，包含未来元数据、是否应阻塞进一步的追加、当前批次是否已满以及是否成功追加。
+     * @throws InterruptedException 如果执行过程中线程被中断。
+     * @throws KafkaException 如果生产者在发送过程中被关闭。
+     */
     public RecordAppendResult append(TopicPartition tp,
                                      long timestamp,
                                      byte[] key,
@@ -186,46 +205,59 @@ public final class RecordAccumulator {
                                      long maxTimeToBlock,
                                      boolean abortOnNewBatch,
                                      long nowMs) throws InterruptedException {
-        // We keep track of the number of appending thread to make sure we do not miss batches in
-        // abortIncompleteBatches().
+        // We keep track of the number of appending thread to make sure we do not miss batches in abortIncompleteBatches().我们跟踪附加线程的数量，以确保我们不会在abortIncompleteBatches()中错过批次。
+        // 增加正在执行的附加操作计数，以确保在abortIncompleteBatches()中不会错过批次
         appendsInProgress.incrementAndGet();
         ByteBuffer buffer = null;
         if (headers == null) headers = Record.EMPTY_HEADERS;
         try {
             // check if we have an in-progress batch
+            // 检查是否有正在进行的批次
             Deque<ProducerBatch> dq = getOrCreateDeque(tp);
+            //使用 synchronized 关键字对双端队列 dq 进行同步访问，确保在同一时刻只有一个线程能对该队列进行操作，从而保证线程安全
             synchronized (dq) {
                 if (closed)
                     throw new KafkaException("Producer closed while send in progress");
+                //尝试向双端队列 dq 中的某个批次追加记录
                 RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq, nowMs);
+                // 检查 tryAppend() 方法返回的 appendResult 是否非空。
+                // 如果非空，说明追加记录成功，直接返回该结果，结束当前方法的执行。
+                // 否则，继续执行后续逻辑，可能需要创建新的批次并尝试追加
                 if (appendResult != null)
                     return appendResult;
             }
 
             // we don't have an in-progress record batch try to allocate a new batch
+            // 如果没有进行中的记录批次，尝试分配一个新批次
             if (abortOnNewBatch) {
                 // Return a result that will cause another call to append.
+                // 返回一个结果，导致再次调用append
                 return new RecordAppendResult(null, false, false, true);
             }
 
             byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
             int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
             log.trace("Allocating a new {} byte message buffer for topic {} partition {} with remaining timeout {}ms", size, tp.topic(), tp.partition(), maxTimeToBlock);
+            // 为主题分配一个新的消息缓冲区
             buffer = free.allocate(size, maxTimeToBlock);
 
             // Update the current time in case the buffer allocation blocked above.
+            // 更新当前时间，以防上面的缓冲区分配阻塞
             nowMs = time.milliseconds();
             synchronized (dq) {
                 // Need to check if producer is closed again after grabbing the dequeue lock.
+                // 在获取deque锁后再次检查生产者是否关闭
                 if (closed)
                     throw new KafkaException("Producer closed while send in progress");
 
                 RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq, nowMs);
                 if (appendResult != null) {
                     // Somebody else found us a batch, return the one we waited for! Hopefully this doesn't happen often...
+                    // 如果有其他人找到了批次，返回我们等待的批次
                     return appendResult;
                 }
 
+                // 创建一个新的记录构建器和批次，并将批次添加到队列和未完成列表中
                 MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer, maxUsableMagic);
                 ProducerBatch batch = new ProducerBatch(tp, recordsBuilder, nowMs);
                 FutureRecordMetadata future = Objects.requireNonNull(batch.tryAppend(timestamp, key, value, headers,
@@ -235,12 +267,16 @@ public final class RecordAccumulator {
                 incomplete.add(batch);
 
                 // Don't deallocate this buffer in the finally block as it's being used in the record batch
+                // 由于记录批次正在使用该缓冲区，因此在此处将其置为null，以避免在finally块中释放
                 buffer = null;
+                // 返回追加结果，包括未来元数据、是否应阻塞进一步追加、当前批次是否已满以及是否成功追加
                 return new RecordAppendResult(future, dq.size() > 1 || batch.isFull(), true, false);
             }
         } finally {
+            // 如果存在未使用的缓冲区，则释放它
             if (buffer != null)
                 free.deallocate(buffer);
+            // 减少正在执行的附加操作计数
             appendsInProgress.decrementAndGet();
         }
     }
@@ -260,19 +296,39 @@ public final class RecordAccumulator {
      *  resources like compression buffers. The batch will be fully closed (ie. the record batch headers will be written
      *  and memory records built) in one of the following cases (whichever comes first): right before send,
      *  if it is expired, or when the producer is closed.
+     * 尝试追加到一个ProducerBatch。如果已满，则返回null并创建新的批处理。
+     * 我们还关闭记录追加的批处理以释放压缩缓冲区等资源。这批货将被完全封闭。记录批处理头将被写入和内存记录构建)在以下情况之一(以先出现的为准):过期或生产商关闭时。
+     */
+    /**
+     * 尝试将记录附加到最后一个生产者批次中。
+     *
+     * @param timestamp 记录的时间戳
+     * @param key 记录的键
+     * @param value 记录的值
+     * @param headers 记录的头部信息
+     * @param callback 附加操作的回调
+     * @param deque 存储生产者批次的双端队列
+     * @param nowMs 当前时间戳（毫秒）
+     * @return 如果附加成功，则返回记录附加结果；如果无法附加，则返回null
      */
     private RecordAppendResult tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers,
                                          Callback callback, Deque<ProducerBatch> deque, long nowMs) {
+        // 尝试获取队列中最后一个批次，并尝试将记录附加到该批次
         ProducerBatch last = deque.peekLast();
         if (last != null) {
             FutureRecordMetadata future = last.tryAppend(timestamp, key, value, headers, callback, nowMs);
+            // 如果附加失败，则关闭该批次以接收新的记录
+            //如果没有足够的空间追加新的记录时候会返回null
             if (future == null)
                 last.closeForRecordAppends();
             else
+                // 如果附加成功，返回记录附加结果，同时标识是否需要提交批次或批次是否已满
                 return new RecordAppendResult(future, deque.size() > 1 || last.isFull(), false, false);
         }
+        // 如果无法找到可用的批次或批次已满，则返回null
         return null;
     }
+
 
     private boolean isMuted(TopicPartition tp) {
         return muted.contains(tp);
@@ -646,6 +702,7 @@ public final class RecordAccumulator {
 
     /**
      * Get the deque for the given topic-partition, creating it if necessary.
+     * 获取给定主题分区的队列，不存在时创建空队列。
      */
     private Deque<ProducerBatch> getOrCreateDeque(TopicPartition tp) {
         Deque<ProducerBatch> d = this.batches.get(tp);
@@ -804,6 +861,7 @@ public final class RecordAccumulator {
 
     /*
      * Metadata about a record just appended to the record accumulator
+     * 关于刚刚附加到记录累加器的记录的元数据
      */
     public final static class RecordAppendResult {
         public final FutureRecordMetadata future;

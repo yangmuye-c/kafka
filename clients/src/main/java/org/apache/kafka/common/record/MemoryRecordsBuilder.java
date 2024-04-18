@@ -70,6 +70,15 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     private float estimatedCompressionRatio = 1.0F;
 
     // Used to append records, may compress data on the fly
+    //用于追加记录，可以动态压缩数据
+    /**
+     * DataOutputStream的主要优势在于它提供了一种跨平台的方式来写入基本数据类型和字符串到输出流中。它的优势主要表现在以下几个方面：
+     * 跨平台性: DataOutputStream以一种独立于平台的方式写入数据，这意味着在不同的操作系统和硬件平台上，写入的数据可以被正确地读取和解析。
+     * 写入多种数据类型: DataOutputStream提供了写入多种基本数据类型的方法，包括int，long，float，double，boolean，char等。这使得我们可以很方便地将这些基本数据类型写入到输出流中。
+     * 写入字符串: DataOutputStream还提供了写入字符串的方法，这使得我们可以将字符串以一种独立于平台的方式写入到输出流中。
+     * 与FileOutputStream和ByteArrayOutputStream等流的兼容性: DataOutputStream可以包装其他类型的输出流，例如FileOutputStream和ByteArrayOutputStream。这意味着你可以使用DataOutputStream将数据写入到文件或者字节数组中。
+     * 高效: DataOutputStream的实现通常是高效的，因为它直接操作字节，而不是通过使用高级Java特性。
+     */
     private DataOutputStream appendStream;
     private boolean isTransactional;
     private long producerId;
@@ -399,25 +408,47 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     /**
      * Append a record and return its checksum for message format v0 and v1, or null for v2 and above.
      */
+    /**
+     * 根据给定的偏移量、是否为控制记录、时间戳、键、值和头部信息追加记录到当前批次中。
+     * 如果是控制记录，则必须追加到控制批次中。偏移量必须递增。时间戳不能为负（除非特别指定为RecordBatch.NO_TIMESTAMP）。
+     * 当批次的魔法值大于V1时，支持记录头部信息。此方法会根据不同的魔法值追加不同格式的记录。
+     *
+     * @param offset         要追加的记录的偏移量。
+     * @param isControlRecord   标记是否为控制记录。
+     * @param timestamp      记录的时间戳。
+     * @param key            记录的键。
+     * @param value          记录的值。
+     * @param headers        记录的头部信息（可选）。
+     * @return 如果使用的是老版本的记录格式，返回追加的记录的大小；否则返回null。
+     * @throws IllegalArgumentException 如果参数不满足追加条件，则抛出此异常。
+     * @throws IOException             如果在写入追加流时发生I/O异常，则抛出此异常。
+     * @throws KafkaException          如果发生非I/O异常，则抛出此异常。
+     */
     private Long appendWithOffset(long offset, boolean isControlRecord, long timestamp, ByteBuffer key,
                                   ByteBuffer value, Header[] headers) {
         try {
+            // 检查控制记录是否被正确地追加到控制批次中
             if (isControlRecord != isControlBatch)
                 throw new IllegalArgumentException("Control records can only be appended to control batches");
 
+            // 确保偏移量递增
             if (lastOffset != null && offset <= lastOffset)
                 throw new IllegalArgumentException(String.format("Illegal offset %s following previous offset %s " +
                         "(Offsets must increase monotonically).", offset, lastOffset));
 
+            // 验证时间戳的合法性
             if (timestamp < 0 && timestamp != RecordBatch.NO_TIMESTAMP)
                 throw new IllegalArgumentException("Invalid negative timestamp " + timestamp);
 
+            // 支持记录头部信息的条件检查
             if (magic < RecordBatch.MAGIC_VALUE_V2 && headers != null && headers.length > 0)
                 throw new IllegalArgumentException("Magic v" + magic + " does not support record headers");
 
+            // 初始化第一批记录的时间戳
             if (firstTimestamp == null)
                 firstTimestamp = timestamp;
 
+            // 根据不同的magic值追加记录
             if (magic > RecordBatch.MAGIC_VALUE_V1) {
                 appendDefaultRecord(offset, timestamp, key, value, headers);
                 return null;
@@ -425,9 +456,11 @@ public class MemoryRecordsBuilder implements AutoCloseable {
                 return appendLegacyRecord(offset, timestamp, key, value, magic);
             }
         } catch (IOException e) {
+            // 处理I/O异常
             throw new KafkaException("I/O exception when writing to the append stream, closing", e);
         }
     }
+
 
     /**
      * Append a new record at the given offset.
@@ -774,6 +807,7 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     /**
      * Check if we have room for a new record containing the given key/value pair. If no records have been
      * appended, then this returns true.
+     * 检查是否有空间容纳包含给定键/值对的新记录
      */
     public boolean hasRoomFor(long timestamp, byte[] key, byte[] value, Header[] headers) {
         return hasRoomFor(timestamp, wrapNullable(key), wrapNullable(value), headers);
@@ -787,26 +821,39 @@ public class MemoryRecordsBuilder implements AutoCloseable {
      * accurate if compression is used. When this happens, the following append may cause dynamic buffer
      * re-allocation in the underlying byte buffer stream.
      */
+    /**
+     * 检查当前缓冲区是否还有空间可以添加一个新的记录。
+     *
+     * @param timestamp 记录的时间戳
+     * @param key 记录的键
+     * @param value 记录的值
+     * @param headers 记录的头部信息
+     * @return 如果有足够的空间添加新的记录，则返回true；否则返回false。
+     */
     public boolean hasRoomFor(long timestamp, ByteBuffer key, ByteBuffer value, Header[] headers) {
+        // 检查缓冲区是否已满
         if (isFull())
             return false;
 
-        // We always allow at least one record to be appended (the ByteBufferOutputStream will grow as needed)
+        // 如果当前没有记录，总是允许添加至少一个记录
         if (numRecords == 0)
             return true;
 
         final int recordSize;
+        // 根据记录的版本计算记录大小
         if (magic < RecordBatch.MAGIC_VALUE_V2) {
             recordSize = Records.LOG_OVERHEAD + LegacyRecord.recordSize(magic, key, value);
         } else {
+            // 计算新记录的大小（不考虑压缩）
             int nextOffsetDelta = lastOffset == null ? 0 : (int) (lastOffset - baseOffset + 1);
             long timestampDelta = firstTimestamp == null ? 0 : timestamp - firstTimestamp;
             recordSize = DefaultRecord.sizeInBytes(nextOffsetDelta, timestampDelta, key, value, headers);
         }
 
-        // Be conservative and not take compression of the new record into consideration.
+        // 检查剩余空间是否足够添加新记录
         return this.writeLimit >= estimatedBytesWritten() + recordSize;
     }
+
 
     public boolean isClosed() {
         return builtRecords != null;

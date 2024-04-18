@@ -95,6 +95,7 @@ public class Sender implements Runnable {
     private final Time time;
 
     /* true while the sender thread is still running */
+    //当sender线程仍在运行时为True
     private volatile boolean running;
 
     /* true when the caller wants to ignore all unsent/inflight messages and force close.  */
@@ -171,6 +172,7 @@ public class Sender implements Runnable {
 
     /**
      *  Get the in-flight batches that has reached delivery timeout.
+     *  获取已达到交付超时的飞行中批次。
      */
     private List<ProducerBatch> getExpiredInflightBatches(long now) {
         List<ProducerBatch> expiredBatches = new ArrayList<>();
@@ -235,6 +237,7 @@ public class Sender implements Runnable {
         log.debug("Starting Kafka producer I/O thread.");
 
         // main loop, runs until close is called
+        //主循环，运行直到close被调用
         while (running) {
             try {
                 runOnce();
@@ -248,6 +251,7 @@ public class Sender implements Runnable {
         // okay we stopped accepting requests but there may still be
         // requests in the transaction manager, accumulator or waiting for acknowledgment,
         // wait until these are completed.
+        //我们停止接受请求，但在事务管理器，累加器或等待确认中可能还有请求，等到这些都完成。
         while (!forceClose && ((this.accumulator.hasUndrained() || this.client.inFlightRequestCount() > 0) || hasPendingTransactionalRequests())) {
             try {
                 runOnce();
@@ -292,12 +296,20 @@ public class Sender implements Runnable {
      * Run a single iteration of sending
      *
      */
+    /**
+     * 执行一次事务操作的过程。
+     * 这个方法首先会尝试解决序列化问题，检查事务管理器状态，更新ProducerId，以及发送事务请求。
+     * 如果遇到异常，会根据异常类型进行相应的处理，例如对于认证异常，会记录日志并进行清理工作。
+     * 正常情况下，会根据当前时间及操作结果来决定下次poll的超时时间，并进行相应的客户端poll操作。
+     */
     void runOnce() {
         if (transactionManager != null) {
             try {
+                // 尝试解决序列化问题
                 transactionManager.maybeResolveSequences();
 
                 // do not continue sending if the transaction manager is in a failed state
+                // 如果事务管理器处于失败状态，则不继续发送操作，并进行重试和错误处理
                 if (transactionManager.hasFatalError()) {
                     RuntimeException lastError = transactionManager.lastError();
                     if (lastError != null)
@@ -308,33 +320,42 @@ public class Sender implements Runnable {
 
                 // Check whether we need a new producerId. If so, we will enqueue an InitProducerId
                 // request which will be sent below
+                // 检查是否需要更新ProducerId，如果需要则进行更新
                 transactionManager.bumpIdempotentEpochAndResetIdIfNeeded();
 
+                // 尝试发送事务请求，如果成功发送则无需继续执行
                 if (maybeSendAndPollTransactionalRequest()) {
                     return;
                 }
             } catch (AuthenticationException e) {
                 // This is already logged as error, but propagated here to perform any clean ups.
+                // 认证异常处理：记录日志并进行清理工作
                 log.trace("Authentication exception while processing transactional request", e);
                 transactionManager.authenticationFailed(e);
             }
         }
 
+        // 获取当前时间，根据当前时间及发送生产者数据的结果决定下次poll的超时时间
         long currentTimeMs = time.milliseconds();
         long pollTimeout = sendProducerData(currentTimeMs);
+        // 执行客户端的poll操作，传入决定的超时时间
         client.poll(pollTimeout, currentTimeMs);
     }
 
     private long sendProducerData(long now) {
         Cluster cluster = metadata.fetch();
         // get the list of partitions with data ready to send
+        //获取准备发送数据的分区列表
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
 
         // if there are any partitions whose leaders are not known yet, force metadata update
+        //如果有任何分区的leader是未知的，那么强制更新元数据
         if (!result.unknownLeaderTopics.isEmpty()) {
             // The set of topics with unknown leader contains topics with leader election pending as well as
             // topics which may have expired. Add the topic again to metadata to ensure it is included
             // and request metadata update, since there are messages to send to the topic.
+            //具有未知领导者的主题集包含尚未进行领导者选举的主题以及可能已过期的主题。
+            // 再次将主题添加到元数据中，以确保包含主题并请求元数据更新，因为有消息要发送到主题。
             for (String topic : result.unknownLeaderTopics)
                 this.metadata.add(topic, now);
 

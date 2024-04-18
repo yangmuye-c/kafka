@@ -595,6 +595,9 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     private final AtomicInteger refcount = new AtomicInteger(0);
 
     // to keep from repeatedly scanning subscriptions in poll(), cache the result during metadata updates
+    //为了避免在poll()中重复扫描订阅，请在元数据更新期间缓存结果
+    //表示是否已经缓存了所有订阅主题分区的最新拉取位置（fetch positions）信息。
+    // 如果为 false，则意味着存在部分位置信息未更新或缺失
     private boolean cachedSubscriptionHashAllFetchPositions;
 
     /**
@@ -674,6 +677,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
             LogContext logContext;
 
             // If group.instance.id is set, we will append it to the log context.
+            // 如果设置了group.instance.id，我们将把它附加到日志上下文中。
             if (groupRebalanceConfig.groupInstanceId.isPresent()) {
                 logContext = new LogContext("[Consumer instanceId=" + groupRebalanceConfig.groupInstanceId.get() +
                         ", clientId=" + clientId + ", groupId=" + groupId.orElse("null") + "] ");
@@ -697,6 +701,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
             this.retryBackoffMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG);
 
             // load interceptors and make sure they get clientId
+            //加载拦截器并确保它们获得clientId
             Map<String, Object> userProvidedConfigs = config.originals();
             userProvidedConfigs.put(ConsumerConfig.CLIENT_ID_CONFIG, clientId);
             List<ConsumerInterceptor<K, V>> interceptorList = (List) (new ConsumerConfig(userProvidedConfigs, false)).getConfiguredInstances(ConsumerConfig.INTERCEPTOR_CLASSES_CONFIG,
@@ -949,6 +954,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                 throw new IllegalArgumentException("Topic collection to subscribe to cannot be null");
             if (topics.isEmpty()) {
                 // treat subscribing to empty topic list as the same as unsubscribing
+                //将订阅空主题列表视为取消订阅
                 this.unsubscribe();
             } else {
                 for (String topic : topics) {
@@ -957,6 +963,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
                 }
 
                 throwIfNoAssignorsConfigured();
+                //清除不属于新分配主题的缓存数据
                 fetcher.clearBufferedDataForUnassignedTopics(topics);
                 log.info("Subscribed to topic(s): {}", Utils.join(topics, ", "));
                 if (this.subscriptions.subscribe(new HashSet<>(topics), listener))
@@ -1092,6 +1099,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
      * @throws IllegalStateException If {@code subscribe()} is called previously with topics or pattern
      *                               (without a subsequent call to {@link #unsubscribe()})
      */
+    //手动为消费者指定分区列表
     @Override
     public void assign(Collection<TopicPartition> partitions) {
         acquireAndEnsureOpen();
@@ -1209,49 +1217,78 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     /**
      * @throws KafkaException if the rebalance callback throws exception
      */
+    /**
+     * 从Kafka消费者中获取记录。
+     *
+     * @param timer 用于控制等待时间和超时的计时器。
+     * @param includeMetadataInTimeout 是否在超时时间内包含元数据更新。
+     * @return ConsumerRecords<K, V> 包含从Kafka主题中拉取到的记录的集合。
+     *         如果在指定的超时时间内没有新的记录，则返回一个空集合。
+     */
     private ConsumerRecords<K, V> poll(final Timer timer, final boolean includeMetadataInTimeout) {
+        //获得锁，并确保消费者没有被关闭。
         acquireAndEnsureOpen();
+
         try {
+            // 记录poll开始的时间
             this.kafkaConsumerMetrics.recordPollStart(timer.currentTimeMs());
 
+            // 检查消费者是否订阅了任何主题或分配了任何分区
             if (this.subscriptions.hasNoSubscriptionOrUserAssignment()) {
                 throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
             }
 
+            // 循环以尝试获取记录，直到超时
             do {
+                // 可能需要唤醒客户端（例如，因为需要发送心跳）
                 client.maybeTriggerWakeup();
 
+                //是否允许在本次poll方法的超时时间内包含元数据更新操作
                 if (includeMetadataInTimeout) {
-                    // try to update assignment metadata BUT do not need to block on the timer for join group
+                    // 允许在本次poll方法的超时时间内包含元数据更新操作
+                    // 第二个参数为false表示不需阻塞等待加入组的响应。这意味着在更新元数据时，如果遇到需要等待组协调（如重新分配分区）的情况，
+                    // 不会影响当前poll操作的超时时间，而是尽可能快地完成元数据更新，即使这意味着可能会在下一次poll时继续尝试更新。
                     updateAssignmentMetadataIfNeeded(timer, false);
                 } else {
+                    // 不将元数据更新纳入本次poll方法的超时时间计算，即必须确保在poll操作期间完成元数据更新。
+                    // 为此，使用无限大（Long.MAX_VALUE）的超时时间创建一个新的计时器
                     while (!updateAssignmentMetadataIfNeeded(time.timer(Long.MAX_VALUE), true)) {
                         log.warn("Still waiting for metadata");
                     }
                 }
 
+                // 为拉取操作获取记录
                 final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = pollForFetches(timer);
                 if (!records.isEmpty()) {
-                    // before returning the fetched records, we can send off the next round of fetches
-                    // and avoid block waiting for their responses to enable pipelining while the user
-                    // is handling the fetched records.
-                    //
-                    // NOTE: since the consumed position has already been updated, we must not allow
-                    // wakeups or any other errors to be triggered prior to returning the fetched records.
+                    /**
+                     * 如果成功获取到记录，则在返回之前发送下一轮的拉取请求，以实现管道化处理，即在用户处理当前拉取到的消息的同时，
+                     * 消费者已经开始发起下一轮的拉取请求，从而减少消息处理过程中的等待时间，提高整体吞吐量。
+                     * 调用fetcher.sendFetches()尝试发送下一轮的拉取请求。如果返回值大于0，说明有新的拉取请求被成功发送。
+                     * 调用client.hasPendingRequests()检查是否存在未完成的请求。如果存在，说明客户端有待处理的网络通信任务。
+                     * 注意：由于已消费位置已被更新，因此必须确保在返回获取的记录前不允许触发唤醒或其他错误
+                     */
                     if (fetcher.sendFetches() > 0 || client.hasPendingRequests()) {
+                        //将所有待发送的请求提交到网络层进行传输
                         client.transmitSends();
                     }
 
+                    // 使用消费者配置的拦截器链（interceptors）对已拉取的记录进行预处理。
+                    // 调用this.interceptors.onConsume(new ConsumerRecords<>(records))方法，
+                    // 将原始记录包装成ConsumerRecords对象并传递给拦截器链。拦截器链可能对这些记录进行诸如过滤、转换等操作。
+                    // 经过拦截器处理后的记录将作为最终结果返回给调用者。
                     return this.interceptors.onConsume(new ConsumerRecords<>(records));
                 }
-            } while (timer.notExpired());
+            } while (timer.notExpired()); // 检查计时器是否超时
 
+            // 如果在指定的超时时间内没有记录可消费，则返回空记录集
             return ConsumerRecords.empty();
         } finally {
+            // 释放资源并记录poll结束时间
             release();
             this.kafkaConsumerMetrics.recordPollEnd(timer.currentTimeMs());
         }
     }
+
 
     boolean updateAssignmentMetadataIfNeeded(final Timer timer, final boolean waitForJoinGroup) {
         if (coordinator != null && !coordinator.poll(timer, waitForJoinGroup)) {
@@ -1264,40 +1301,67 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
     /**
      * @throws KafkaException if the rebalance callback throws exception
      */
+    /**
+     * 从Kafka消费者中获取数据记录。
+     * 此方法将根据当前的定时器剩余时间以及协调器提供的下一个轮询时间来确定轮询Kafka的超时时间。
+     * 如果已经有数据可用，则会立即返回这些数据；
+     * 如果没有，则会发送新的获取请求，并在合适的超时时间内等待数据。
+     * @param timer 用于控制和测量此次获取数据操作的定时器。
+     * @return 一个映射，键是主题分区，值是该分区获取到的消息记录列表。
+     */
     private Map<TopicPartition, List<ConsumerRecord<K, V>>> pollForFetches(Timer timer) {
+        // 计算轮询超时时间，如果协调器不存在，则使用定时器的剩余时间；如果存在，则使用协调器提供的下一个轮询时间和定时器剩余时间中的较小值。
+        //coordinator.timeToNextPoll(timer.currentTimeMs())：返回协调器提供的下一个轮询时间，单位为毫秒。
+        // 通常用于指导消费者客户端何时发起下一轮的 poll() 操作，以避免过于频繁地轮询导致不必要的网络开销，
+        // 同时保证能够及时响应 Kafka 集群中的数据更新和其他消费者组状态变化。
         long pollTimeout = coordinator == null ? timer.remainingMs() :
                 Math.min(coordinator.timeToNextPoll(timer.currentTimeMs()), timer.remainingMs());
 
-        // if data is available already, return it immediately
+        // 检查是否有已经可用的数据，如果有，则直接返回。
         final Map<TopicPartition, List<ConsumerRecord<K, V>>> records = fetcher.fetchedRecords();
         if (!records.isEmpty()) {
             return records;
         }
 
-        // send any new fetches (won't resend pending fetches)
+        // 发送新的获取请求，不重发待处理的获取请求。在执行这一操作时，仅针对那些尚未发送过的请求进行发送，避免重复发送已经处于待处理状态的请求。
+        // 在 sendFetches() 方法内部，会检查待发送请求队列，
+        // 仅处理那些尚未发送过或需要重新发送（如由于网络故障等原因导致前一次发送失败）的请求，而忽略那些已经在等待服务器响应的请求。
         fetcher.sendFetches();
 
-        // We do not want to be stuck blocking in poll if we are missing some positions
-        // since the offset lookup may be backing off after a failure
 
-        // NOTE: the use of cachedSubscriptionHashAllFetchPositions means we MUST call
-        // updateAssignmentMetadataIfNeeded before this method.
+        /**
+         * 防止因缺失位置信息而在此处阻塞，调整超时时间。
+         * cachedSubscriptionHashAllFetchPositions：表示是否已经缓存了所有订阅主题分区的最新拉取位置（fetch positions）信息。
+         * 如果为 false，则意味着存在部分位置信息未更新或缺失。
+         * retryBackoffMs：通常是一个固定的毫秒数，用于定义在遇到问题（如位置信息缺失）时应等待的最短时间。
+         * pollTimeout > retryBackoffMs：比较当前的轮询超时时间（pollTimeout）是否大于一个预设的重试退避时间（retryBackoffMs）
+         */
         if (!cachedSubscriptionHashAllFetchPositions && pollTimeout > retryBackoffMs) {
+            /**
+             * 将轮询超时时间 pollTimeout 设置为 retryBackoffMs 的值。
+             * 这样做的效果是缩短了等待服务器响应的最长时间，使得程序在遇到位置信息缺失时不会长时间阻塞，
+             * 而是尽快尝试下一次轮询（可能在较短的时间后），或者执行其他操作（如重新获取位置信息）。
+             */
             pollTimeout = retryBackoffMs;
         }
 
+        // 跟踪此次轮询的超时时间。
         log.trace("Polling for fetches with timeout {}", pollTimeout);
-
         Timer pollTimer = time.timer(pollTimeout);
+
+        // 对客户端进行轮询，直到有可用的数据或达到超时时间。
         client.poll(pollTimer, () -> {
-            // since a fetch might be completed by the background thread, we need this poll condition
-            // to ensure that we do not block unnecessarily in poll()
+            // 如果后台线程可能完成了数据获取，则需要此条件来确保不会在poll()中不必要地阻塞。
             return !fetcher.hasAvailableFetches();
         });
+
+        // 更新定时器，以反映实际的轮询时间。
         timer.update(pollTimer.currentTimeMs());
 
+        // 返回获取到的数据记录。
         return fetcher.fetchedRecords();
     }
+
 
     /**
      * Commit offsets returned on the last {@link #poll(Duration) poll()} for all the subscribed list of topics and
@@ -2428,6 +2492,7 @@ public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
     /**
      * Acquire the light lock and ensure that the consumer hasn't been closed.
+     * 获得锁，并确保消费者没有被关闭。
      * @throws IllegalStateException If the consumer has been closed
      */
     private void acquireAndEnsureOpen() {
